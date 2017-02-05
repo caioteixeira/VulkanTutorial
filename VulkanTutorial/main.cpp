@@ -5,67 +5,14 @@
 #include <stdexcept>
 #include <functional>
 #include <vector>
+#include "VkDebugProxies.h"
+#include "VDeleter.h"
 
-template <typename T>
-class VDeleter {
-public:
-	VDeleter() : VDeleter([](T, VkAllocationCallbacks*) {}) {}
-
-	VDeleter(std::function<void(T, VkAllocationCallbacks*)> deletef) {
-		this->deleter = [=](T obj) { deletef(obj, nullptr); };
-	}
-
-	VDeleter(const VDeleter<VkInstance>& instance, std::function<void(VkInstance, T, VkAllocationCallbacks*)> deletef) {
-		this->deleter = [&instance, deletef](T obj) { deletef(instance, obj, nullptr); };
-	}
-
-	VDeleter(const VDeleter<VkDevice>& device, std::function<void(VkDevice, T, VkAllocationCallbacks*)> deletef) {
-		this->deleter = [&device, deletef](T obj) { deletef(device, obj, nullptr); };
-	}
-
-	~VDeleter() {
-		cleanup();
-	}
-
-	const T* operator &() const {
-		return &object;
-	}
-
-	T* replace() {
-		cleanup();
-		return &object;
-	}
-
-	operator T() const {
-		return object;
-	}
-
-	void operator=(T rhs) {
-		if (rhs != object) {
-			cleanup();
-			object = rhs;
-		}
-	}
-
-	template<typename V>
-	bool operator==(V rhs) {
-		return object == T(rhs);
-	}
-
-private:
-	T object{ VK_NULL_HANDLE };
-	std::function<void(T)> deleter;
-
-	void cleanup() {
-		if (object != VK_NULL_HANDLE) {
-			deleter(object);
-		}
-		object = VK_NULL_HANDLE;
-	}
-};
-
-const int WIDTH = 800;
-const int HEIGHT = 600;
+#ifdef NDEBUG
+const bool enableValidationLayers = false;
+#else
+const bool enableValidationLayers = true;
+#endif
 
 class HelloTriangleApplication {
 public:
@@ -78,9 +25,92 @@ public:
 private:
 	GLFWwindow* window;
 	VDeleter<VkInstance> instance{ vkDestroyInstance };
+	VkDebugReportCallbackEXT callback;
+	VkPhysicalDevice physicalDevice = VK_NULL_HANDLE;
+
+	const int WIDTH = 800;
+	const int HEIGHT = 600;
+
+	const std::vector<const char*> validationLayers = {
+		"VK_LAYER_LUNARG_standard_validation"
+	};
+
+	static VKAPI_ATTR VkBool32 VKAPI_CALL debugCallback(
+		VkDebugReportFlagsEXT flags,
+		VkDebugReportObjectTypeEXT objType,
+		uint64_t obj,
+		size_t location,
+		int32_t code,
+		const char* layerPrefix,
+		const char* msg,
+		void* userData
+		)
+	{
+		std::cerr << "validation layer: " << msg << std::endl;
+
+		return VK_FALSE;
+	}
+
+	bool checkValidationLayerSupport()
+	{
+		uint32_t layerCount;
+		vkEnumerateInstanceLayerProperties(&layerCount, nullptr);
+
+		std::vector<VkLayerProperties> availableLayers(layerCount);
+		vkEnumerateInstanceLayerProperties(&layerCount, availableLayers.data());
+
+		for(const char* layerName : validationLayers)
+		{
+			bool layerFound = false;
+
+			for(const auto& layerProperties: availableLayers)
+			{
+				if(strcmp(layerName, layerProperties.layerName) == 0)
+				{
+					layerFound = true;
+					break;
+				}
+			}
+
+			if(!layerFound)
+			{
+				return false;
+			}
+		}
+
+		return true;
+	}
+
+	std::vector<const char*> getRequiredExtensions()
+	{
+		std::vector<const char*> extensions;
+
+		unsigned int glfwExtensionCount = 0;
+		const char** glfwExtensions;
+
+		glfwExtensions = glfwGetRequiredInstanceExtensions(&glfwExtensionCount);
+
+		for (unsigned i = 0; i < glfwExtensionCount; i++)
+		{
+			extensions.push_back(glfwExtensions[i]);
+		}
+
+		if(enableValidationLayers)
+		{
+			extensions.push_back(VK_EXT_DEBUG_REPORT_EXTENSION_NAME);
+		}
+
+		return extensions;
+	}
 
 	void createInstance()
 	{
+		if(enableValidationLayers && !checkValidationLayerSupport())
+		{
+			throw std::runtime_error("validation layer requested, but not available!");
+		}
+
+
 		VkApplicationInfo appInfo = {};
 		appInfo.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
 		appInfo.pApplicationName = "Hello Triangle";
@@ -93,14 +123,19 @@ private:
 		createInfo.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
 		createInfo.pApplicationInfo = &appInfo;
 
-		unsigned int glfwExtensionCount = 0;
-		const char** glfwExtensions;
-		glfwExtensions = glfwGetRequiredInstanceExtensions(&glfwExtensionCount);
+		auto extensions = getRequiredExtensions();
+		createInfo.enabledExtensionCount = extensions.size();
+		createInfo.ppEnabledExtensionNames = extensions.data();
 
-		createInfo.enabledExtensionCount = glfwExtensionCount;
-		createInfo.ppEnabledExtensionNames = glfwExtensions;
-
-		createInfo.enabledLayerCount = 0;
+		if(enableValidationLayers)
+		{
+			createInfo.enabledLayerCount = validationLayers.size();
+			createInfo.ppEnabledLayerNames = validationLayers.data();
+		}
+		else
+		{
+			createInfo.enabledLayerCount = 0;
+		}
 
 		VkResult result = vkCreateInstance(&createInfo, nullptr, instance.replace());
 		if (result != VK_SUCCESS)
@@ -110,13 +145,13 @@ private:
 
 		uint32_t extensionCount = 0;
 		vkEnumerateInstanceExtensionProperties(nullptr, &extensionCount, nullptr);
-		std::vector<VkExtensionProperties> extensions(extensionCount);
-		vkEnumerateInstanceExtensionProperties(nullptr, &extensionCount, extensions.data());
+		std::vector<VkExtensionProperties> extensionProperties(extensionCount);
+		vkEnumerateInstanceExtensionProperties(nullptr, &extensionCount, extensionProperties.data());
 
 		std::cout << "available extensions:" << std::endl;
 
-		for (const auto& extension : extensions) {
-			std::cout << "\t" << extension.extensionName << std::endl;
+		for (const auto& extensionProperty : extensionProperties) {
+			std::cout << "\t" << extensionProperty.extensionName << std::endl;
 		}
 	}
 
@@ -129,8 +164,57 @@ private:
 		window = glfwCreateWindow(WIDTH, HEIGHT, "Vulkan", nullptr, nullptr);
 	}
 
+	void setupDebugCallback()
+	{
+		if (!enableValidationLayers) return;
+
+		VkDebugReportCallbackCreateInfoEXT createInfo = {};
+		createInfo.sType = VK_STRUCTURE_TYPE_DEBUG_REPORT_CALLBACK_CREATE_INFO_EXT;
+		createInfo.flags = VK_DEBUG_REPORT_ERROR_BIT_EXT | VK_DEBUG_REPORT_WARNING_BIT_EXT;
+		createInfo.pfnCallback = debugCallback;
+
+		VDeleter<VkDebugReportCallbackEXT> callback{ instance, DestroyDebugReportCallbackEXT };
+
+		if (CreateDebugReportCallbackEXT(instance, &createInfo, nullptr, callback.replace()) != VK_SUCCESS) {
+			throw std::runtime_error("failed to set up debug callback!");
+		}
+	}
+
 	void initVulkan() {
 		createInstance();
+		setupDebugCallback();
+		pickPhysicalDevice();
+	}
+
+	void pickPhysicalDevice()
+	{
+		uint32_t deviceCount = 0;
+		vkEnumeratePhysicalDevices(instance, &deviceCount, nullptr);
+
+		if (deviceCount == 0) {
+			throw std::runtime_error("failed to find GPUs with Vulkan support!");
+		}
+
+		std::vector<VkPhysicalDevice> devices(deviceCount);
+		vkEnumeratePhysicalDevices(instance, &deviceCount, devices.data());
+
+		for(const auto& device : devices)
+		{
+			if(isDeviceSuitable(device))
+			{
+				physicalDevice = device;
+				break;
+			}
+		}
+
+		if(physicalDevice == VK_NULL_HANDLE)
+		{
+			throw std::runtime_error("failed to find a suitable GPU!");
+		}
+	}
+
+	bool isDeviceSuitable(VkPhysicalDevice device) {
+		return true;
 	}
 
 	void mainLoop() {
